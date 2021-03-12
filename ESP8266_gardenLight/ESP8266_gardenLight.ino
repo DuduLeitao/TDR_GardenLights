@@ -4,8 +4,8 @@
 
 /* WiFi credentials */
 #ifndef STASSID
-#define STASSID "DharmaWAN"
-#define STAPSK  "MVNpWH5u"
+#define STASSID "SSID"
+#define STAPSK  "PASS"
 #endif
 
 /* Store WiFi credentials in local constants */
