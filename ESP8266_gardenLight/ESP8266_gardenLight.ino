@@ -1,16 +1,19 @@
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
+#include <WiFiClientSecure.h>
+#include <WiFiUdp.h>
+#include <NTPClient.h>
 
 /* WiFi credentials */
 #ifndef STASSID
-#define STASSID "SSID"
-#define STAPSK  "PASS"
+#define STASSID "your_WiFi_SSID"
+#define STAPSK  "your_WiFi_password"
 #endif
 
 /* Store WiFi credentials in local constants */
-const char* ssid     = STASSID;
-const char* password = STAPSK;
+static const char* ssid     = STASSID;
+static const char* password = STAPSK;
 
 /* Statig IP configuration */
 IPAddress local_IP(192, 168, 1, 100);
@@ -22,15 +25,27 @@ IPAddress secondaryDNS(1, 1, 1, 1);
 /* ESP8266 server port configuration */
 ESP8266WebServer server(80);
 
+/* Web URL were the sunset time data can be found */
+#define DATA_FETCH_WEBSITE "www.timeanddate.com"
+#define DATA_FETCH_URL "/astronomy/spain/vigo"
+
 /* Variable declaration and initializarion */
-const int led_builtin = LED_BUILTIN;
-const int rele_signal_light = D3;
-const int button_signal_light = D2;
-//const int interruptionPin = D2;
-volatile unsigned long debounce_delay = 50;
+static const int led_builtin = LED_BUILTIN;
+static const int rele_signal_light = D3;
+static const int button_signal_light = D2;
+
+/* Time period for debouncing the button signal [ms] */
+volatile unsigned long debounce_delay = 50; // Time period for debouncing the button signal [ms].
+
+/* Local time region offset from UTC time [s] */
+const long utc_offset = 3600;
+
+/* Variables to store current time and sunset moment in minutes since 00:00 h */
+static int today_sunset_minute;
+static int today_current_minute;
 
 /* Welcome text showed when the user makes a request to root */
-const String welcome_root_text = \
+static const String welcome_root_text = \
 "<html>\
   <head>\
     <title>ESP8266 Web Server POST handling</title>\
@@ -44,12 +59,12 @@ const String welcome_root_text = \
 </html>";
 
 /* Response given to requests to root */
-void handleRoot() {
+static void handleRoot() {
   server.send(200, "text/html", welcome_root_text);
 }
 
 /* Function called when the request path matches URL/postcommand/ */
-void handleCommand()
+static void handleCommand()
 {
   String message = "";
 
@@ -82,7 +97,7 @@ void handleCommand()
 
 
 /* Function called when request path does not match any of the ones available */
-void handleNotFound()
+static void handleNotFound()
 {
   String message = "Sorry, there is no handler for your request :(\n\nYour request data:\n";
   message += "\tURI: ";
@@ -98,7 +113,150 @@ void handleNotFound()
   server.send(404, "text/plain", message);
 }
 
-void checkButtonPressedRoutine(void)
+/* Function that checks the current time with a NTP server and returns the time in minutes */
+static int updateTodayMinutes(void)
+{
+  /* Define NTP Client to get time */
+  WiFiUDP ntp_udp;
+  NTPClient timeClient(ntp_udp, "pool.ntp.org", utc_offset);
+
+  timeClient.begin();
+  timeClient.update();
+  today_current_minute = timeClient.getHours() * 60 + timeClient.getMinutes();
+}
+
+/* Function that fetches the data from website to get the sunset time */
+static void fetchSunsetTime(void)
+{
+  /* Web from where the data will be fetched */
+  const char* host = DATA_FETCH_WEBSITE;
+
+  /* Use WiFiClient class to create TCP connections */
+  WiFiClientSecure client;
+
+  /* Avoid the need to use IFTTT SSL certificates */
+  client.setInsecure();
+
+  Serial.print("Connecting to ");
+  Serial.println(host);
+
+  /* Try to open connection with the web */
+  const int httpPort = 443;
+  if (!client.connect(host, httpPort))
+  {
+    Serial.println("Connection failed :(");
+    return;
+  }
+
+  /* Give the ESP8266 processing time */
+  yield();
+
+  /* Create a URI for the request */
+  String url = DATA_FETCH_URL;
+
+  Serial.print("Requesting URL: ");
+  Serial.println(url);
+
+  /* Send HTTP request */
+  client.print(F("GET "));
+  /* Send second half of a request (everything that comes after the base URL) */
+  client.print(url);
+  client.println(F(" HTTP/1.1"));
+  /* Headers */
+  client.print(F("Host: "));
+  client.println(host);
+  /* Do not use cache */
+  client.println(F("Cache-Control: no-cache"));
+  /* Check request state */
+  if (client.println() == 0)
+  {
+    Serial.println(F("Failed to send request"));
+    return;
+  }
+
+  /* Check HTTP response status */
+  char status[32] = {0};
+  client.readBytesUntil('\r', status, sizeof(status));
+  if (strcmp(status, "HTTP/1.1 200 OK") != 0)
+  {
+    Serial.print(F("Unexpected response for sunset data request: "));
+    Serial.println(status);
+    return;
+  }
+
+  /* Skip HTTP response headers */
+  char end_of_headers[] = "\r\n\r\n";
+  if (!client.find(end_of_headers))
+  {
+    Serial.println(F("Failed while skiping headers from sunset data response"));
+    return;
+  }
+
+  /* Buffer to store the sunset time data */
+  char sunset_time_char_array[32] = {0};
+
+  /* Sequence of HTML that precedes the desired data */
+  char sunset_data_preceder[] = "Civil Twilight</th><td class=tr>";
+
+  /* Sequence of HTML that directly precedes the desired data. (We want the falue that comes after the '-') */
+  char sunset_data_preceder_after_dash_string[] = "; ";
+
+  /* Skip the first appearance of the sunset_data_preceder code sequence. (we are interested in the second one) */
+  if (!client.find(sunset_data_preceder))
+  {
+    Serial.print(F("There was no match for \""));
+    Serial.print(sunset_data_preceder);
+    Serial.println(F("\""));
+    return;
+  }
+  /* Locate the second appearance of the sunset_data_preceder code sequence */
+  else if (!client.find(sunset_data_preceder))
+  {
+    Serial.print(F("There was no second match for \""));
+    Serial.print(sunset_data_preceder);
+    Serial.println(F("\""));
+    return;
+  }
+  /* Skip the first time data value and position the reading pointer after the sunset_data_preceder_after_dash_string sequence of HTML code */
+  else if (!client.find(sunset_data_preceder_after_dash_string))
+  {
+    Serial.print(F("There was no match for \""));
+    Serial.println(sunset_data_preceder_after_dash_string);
+    Serial.println(F("\""));
+    return;
+  }
+  /* At this point the sunset time data has been located */
+  else
+  {
+    /* Read until the reading pointer reaches the HTML character that comes directly after the sunset time data ('<') */
+    client.readBytesUntil('<', sunset_time_char_array, sizeof(sunset_time_char_array));
+    Serial.print("Sunset time today: ");
+    Serial.print(sunset_time_char_array);
+    Serial.println(" h");
+
+    /* Convert char array to minutes of the day */
+    char time_hour_today_char_array[3];
+    int time_hour_today;
+    char time_minute_today_char_array[3];
+    int time_minute_today;
+    time_hour_today_char_array[0] = sunset_time_char_array[0];
+    time_hour_today_char_array[1] = sunset_time_char_array[1];
+    time_hour_today_char_array[2] = '\0';
+    time_minute_today_char_array[0] = sunset_time_char_array[3];
+    time_minute_today_char_array[1] = sunset_time_char_array[4];
+    time_minute_today_char_array[2] = '\0';
+    sscanf(time_hour_today_char_array, "%d", &time_hour_today);
+    sscanf(time_minute_today_char_array, "%d", &time_minute_today);
+    today_sunset_minute = time_hour_today * 60 + time_minute_today;
+  }
+  
+  Serial.print(F("Connection to "));
+  Serial.print(DATA_FETCH_WEBSITE);
+  Serial.println(F(" closed"));  
+}
+
+/* Function in charche of getting the debounced value of the button_signal_light button signal */
+static void checkButtonPressedRoutine(void)
 {
   /* Local variables */
   static int last_steady_button_state = HIGH;       // The previous steady state from the input pin.
@@ -195,4 +353,14 @@ void setup(void)
 void loop(void) {
   server.handleClient();
   checkButtonPressedRoutine();
+  fetchSunsetTime();
+  updateTodayMinutes();
+
+
+  Serial.print("Sunset minute today: ");
+  Serial.println(today_sunset_minute);
+  Serial.print(F("Today current minute: "));
+  Serial.println(today_current_minute);
+  
+  delay(60000000);
 }
