@@ -4,11 +4,12 @@
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h>
+#include <Ticker.h>
 
 /* WiFi credentials */
 #ifndef STASSID
-#define STASSID "your_WiFi_SSID"
-#define STAPSK  "your_WiFi_password"
+#define STASSID "DharmaWAN"
+#define STAPSK  "MVNpWH5u"
 #endif
 
 /* Store WiFi credentials in local constants */
@@ -43,6 +44,13 @@ const long utc_offset = 3600;
 /* Variables to store current time and sunset moment in minutes since 00:00 h */
 static int today_sunset_minute;
 static int today_current_minute;
+
+static Ticker ticker_lights_switch_on;
+static Ticker ticker_routine;
+
+static bool flag_hour = true;
+
+#define TIME_SPAN_HOUR  3600
 
 /* Welcome text showed when the user makes a request to root */
 static const String welcome_root_text = \
@@ -123,6 +131,8 @@ static int updateTodayMinutes(void)
   timeClient.begin();
   timeClient.update();
   today_current_minute = timeClient.getHours() * 60 + timeClient.getMinutes();
+  Serial.print(F("Current time (minutes): "));
+  Serial.println(today_current_minute);
 }
 
 /* Function that fetches the data from website to get the sunset time */
@@ -137,14 +147,14 @@ static void fetchSunsetTime(void)
   /* Avoid the need to use IFTTT SSL certificates */
   client.setInsecure();
 
-  Serial.print("Connecting to ");
+  Serial.print(F("Connecting to "));
   Serial.println(host);
 
   /* Try to open connection with the web */
   const int httpPort = 443;
   if (!client.connect(host, httpPort))
   {
-    Serial.println("Connection failed :(");
+    Serial.println(F("Connection failed :("));
     return;
   }
 
@@ -230,9 +240,9 @@ static void fetchSunsetTime(void)
   {
     /* Read until the reading pointer reaches the HTML character that comes directly after the sunset time data ('<') */
     client.readBytesUntil('<', sunset_time_char_array, sizeof(sunset_time_char_array));
-    Serial.print("Sunset time today: ");
-    Serial.print(sunset_time_char_array);
-    Serial.println(" h");
+//    Serial.print("Sunset time today: ");
+//    Serial.print(sunset_time_char_array);
+//    Serial.println(" h");
 
     /* Convert char array to minutes of the day */
     char time_hour_today_char_array[3];
@@ -248,6 +258,8 @@ static void fetchSunsetTime(void)
     sscanf(time_hour_today_char_array, "%d", &time_hour_today);
     sscanf(time_minute_today_char_array, "%d", &time_minute_today);
     today_sunset_minute = time_hour_today * 60 + time_minute_today;
+    Serial.print(F("Sunset time today (minutes): "));
+    Serial.println(today_sunset_minute);
   }
   
   Serial.print(F("Connection to "));
@@ -305,6 +317,48 @@ static void checkButtonPressedRoutine(void)
   }
 }
 
+static void switchOnLights(void)
+{
+  /* Switch on the lights */
+  digitalWrite(led_builtin, LOW);
+
+  /* Disable ticker_lights_switch_on ticker */
+  ticker_lights_switch_on.detach();
+
+  Serial.println(F("LED ON!"));
+}
+
+
+static void lightTickerManager(void)
+{
+  flag_hour = true;
+}
+
+void checkTimeManager(void)
+{
+  if (flag_hour)
+  {
+    flag_hour = false;
+    updateTodayMinutes();
+    if (today_current_minute > today_sunset_minute)
+    {
+      /* Disable ticker_lights_switch_on ticker */
+      ticker_lights_switch_on.detach();
+
+      /* Update sunset time variable */
+      fetchSunsetTime();
+    }
+    if (((today_sunset_minute - today_current_minute) >= 0) && (((today_sunset_minute - today_current_minute) * 60) <= TIME_SPAN_HOUR))
+    {
+      /* Update time on ticker_lights_switch_on ticker */
+      ticker_lights_switch_on.attach((today_sunset_minute - today_current_minute) * 60, switchOnLights);
+      Serial.print(F("Lights will be switched on in "));
+      Serial.print(today_sunset_minute - today_current_minute);
+      Serial.println(F(" minutes"));
+    }
+  }
+}
+
 void setup(void)
 {
   /* Configure GPIOs */
@@ -320,7 +374,7 @@ void setup(void)
   /* Configure static IP address for the ESP8266 */
   if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS))
   {
-    Serial.println("Something failed during WiFi static IP configuration.");
+    Serial.println(F("Something failed during WiFi static IP configuration."));
   }
 
   /* Initialize WiFi network settings */
@@ -335,9 +389,9 @@ void setup(void)
 
   /* Show WiFi connection data through serial port */
   Serial.println("");
-  Serial.print("Connected to ");
+  Serial.print(F("Connected to "));
   Serial.println(ssid);
-  Serial.print("IP address: ");
+  Serial.print(F("IP address: "));
   Serial.println(WiFi.localIP());
 
   /* Request paths */
@@ -347,20 +401,13 @@ void setup(void)
 
   /* Initialize HTTP server */
   server.begin();
-  Serial.println("HTTP server started");
+  Serial.println(F("HTTP server started"));
+
+  ticker_routine.attach(TIME_SPAN_HOUR, lightTickerManager);
 }
 
 void loop(void) {
   server.handleClient();
   checkButtonPressedRoutine();
-  fetchSunsetTime();
-  updateTodayMinutes();
-
-
-  Serial.print("Sunset minute today: ");
-  Serial.println(today_sunset_minute);
-  Serial.print(F("Today current minute: "));
-  Serial.println(today_current_minute);
-  
-  delay(60000000);
+  checkTimeManager();
 }
