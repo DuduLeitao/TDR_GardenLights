@@ -5,11 +5,12 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <Ticker.h>
+#include <Timezone.h>
 
 /* WiFi credentials */
 #ifndef STASSID
-#define STASSID "your_WiFi_SSID"
-#define STAPSK  "your_WiFi_pass"
+#define STASSID "my_WiFi_SSID"
+#define STAPSK  "my_WiFi_password"
 #endif
 
 /* Store WiFi credentials in local constants */
@@ -17,7 +18,7 @@ static const char* ssid     = STASSID;
 static const char* password = STAPSK;
 
 /* Statig IP configuration */
-IPAddress local_IP(192, 168, 1, 100);
+IPAddress local_IP(192, 168, 1, 149);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 IPAddress primaryDNS(8, 8, 8, 8);
@@ -29,6 +30,8 @@ ESP8266WebServer server(80);
 /* Web URL were the sunset time data can be found */
 #define DATA_FETCH_WEBSITE "www.timeanddate.com"
 #define DATA_FETCH_URL "/astronomy/spain/vigo"
+
+#define TIME_SPAN_HOUR  3600
 
 /* Variable declaration and initializarion */
 static const int led_builtin = LED_BUILTIN;
@@ -50,7 +53,13 @@ static Ticker ticker_routine;
 
 static bool flag_hour = true;
 
-#define TIME_SPAN_HOUR  3600
+/* Flag that enables automatic lights */
+static bool automatic_lights_en = false;
+
+// Central Europe Time
+TimeChangeRule CEST = {"CEST", Last, Sun, Mar, 2, 60};     // Hora de Verano de Europa Central
+TimeChangeRule CET = {"CET ", Last, Sun, Oct, 3, 0};      // Hora Estandar de Europa Central
+Timezone CE(CEST, CET);
 
 /* Welcome text showed when the user makes a request to root */
 static const String welcome_root_text = \
@@ -97,6 +106,24 @@ static void handleCommand()
     else if ((server.argName(0) == "lightbox") && (server.arg(0) == "lightstate"))
     {
       message += (digitalRead(rele_signal_light) == HIGH) ? "OFF" : "ON";
+      message += automatic_lights_en ? "A" : "";
+      
+      Serial.println(message);
+    }
+    /* Check if it is the commang to enable auto switch on */
+    else if ((server.argName(0) == "lightbox") && (server.arg(0) == "automatic_light_en"))
+    {
+      message += "Automatic lights enabled";
+      automatic_lights_en = true;
+      flag_hour = true;
+      checkTimeManager();
+      Serial.println(message);
+    }
+    /* Check if it is the commang to enable auto switch off */
+    else if ((server.argName(0) == "lightbox") && (server.arg(0) == "automatic_light_not_en"))
+    {
+      message += "Automatic lights disabled";
+      automatic_lights_en = false;
       Serial.println(message);
     }
     server.send(200, "text/plain", message);
@@ -122,7 +149,7 @@ static void handleNotFound()
 }
 
 /* Function that checks the current time with a NTP server and returns the time in minutes */
-static int updateTodayMinutes(void)
+static void updateTodayMinutes(void)
 {
   /* Define NTP Client to get time */
   WiFiUDP ntp_udp;
@@ -130,7 +157,12 @@ static int updateTodayMinutes(void)
 
   timeClient.begin();
   timeClient.update();
-  today_current_minute = timeClient.getHours() * 60 + timeClient.getMinutes();
+
+  unsigned long utc =  timeClient.getEpochTime();
+  // Convert UTC time to local time
+  time_t time_local = CE.toLocal(utc);
+  today_current_minute = hour(time_local) * 60 + minute(time_local);
+  
   Serial.print(F("Current time (minutes): "));
   Serial.println(today_current_minute);
 }
@@ -317,23 +349,27 @@ static void checkButtonPressedRoutine(void)
   }
 }
 
+/* Funtion in charge of switching on the lights when it is sunset time */
 static void switchOnLights(void)
 {
-  /* Switch on the lights */
-  digitalWrite(led_builtin, LOW);
+  if (automatic_lights_en)
+  {
+    /* Switch on the lights */
+    digitalWrite(led_builtin, LOW);
+    digitalWrite(rele_signal_light, LOW);
+  }
 
   /* Disable ticker_lights_switch_on ticker */
   ticker_lights_switch_on.detach();
-
-  Serial.println(F("LED ON!"));
 }
 
-
+/* Function triggered every hour to launch checkTimeManager() function */
 static void lightTickerManager(void)
 {
   flag_hour = true;
 }
 
+/* Function in charge of all the logic regarding updating current time and calculating sunset time */
 void checkTimeManager(void)
 {
   if (flag_hour)
@@ -407,7 +443,25 @@ void setup(void)
 }
 
 void loop(void) {
-  server.handleClient();
-  checkButtonPressedRoutine();
-  checkTimeManager();
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    server.handleClient();    
+    checkButtonPressedRoutine();
+    if (automatic_lights_en)
+    {
+      checkTimeManager();
+    }
+  }
+  else
+  {
+    /* Initialize WiFi network settings */
+    WiFi.begin(ssid, password);
+  
+    /* Wait for connection */
+    while (WiFi.status() != WL_CONNECTED)
+    {
+      delay(500);
+      Serial.print(".");
+    }
+  }
 }
